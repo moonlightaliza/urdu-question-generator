@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+venv/
+env/
+.venv/
+
+# Environment / secrets
+.env
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Model checkpoints (large, shouldn't be in git)
+*.pt
+*.pth
+*.ckpt
+checkpoints/
+
+# SentencePiece trained model files (large, regenerable — optional, see note below)
+*.model
+*.vocab
+
+# Raw/large data (optional — see note)
+data/*.tsv
+
+# Kaggle/Colab specific
+kaggle.json
