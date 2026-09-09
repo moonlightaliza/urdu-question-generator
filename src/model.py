@@ -21,3 +21,124 @@ class Encoder(nn.Module):
         unpacked_output, _ = torch.nn.utils.rnn.pad_packed_sequence(output, batch_first = True)
 
         return unpacked_output, h, c
+
+
+# E = embedding size
+# H = encoder hidden dim
+# S = source length, T = target length, B = batch size
+# V = vocabulary
+
+import torch.nn as nn
+import torch.nn.functional as F
+import torch
+
+S = 10
+
+class BahdanauAttention(nn.Module):
+    def __init__(self, H):
+        super().__init__()
+        self.W1 = nn.Linear(H, H)
+        self.W2 = nn.Linear(2*H, H)
+        self.V = nn.Linear(H, 1)
+    
+    def forward(self, query, keys):
+        query = query.unsqueeze(1) # [B, H] -> [B, 1, H]
+        scores = self.V(torch.tanh(self.W1(query) + self.W2(keys))) # [B, S, 1]
+        scores = scores.squeeze(-1) # [B, S]
+        attn_w = F.softmax(scores, dim=-1).unsqueeze(1)  # [B, 1, S]
+        context_vec = torch.bmm(attn_w, keys) # [B, 1, 2H]
+
+        return context_vec, attn_w
+
+
+class Decoder(nn.Module):
+    def __init__(self, embedding, H, V, E, dropout = 0.1):
+        super().__init__()
+        self.embedding = embedding
+        self.lstm = nn.LSTM(input_size=E + 2*H, num_layers=2, hidden_size=H, batch_first=True, dropout=dropout)
+        self.attention = BahdanauAttention(H)
+        self.out = nn.Linear(H, V)
+
+    
+    def forward_step(self, inp, hidden, cell, encoder_out):
+        embed = self.embedding(inp) # (B, 1, E)
+        query = hidden[-1] # (B, H)
+        context, attn = self.attention(query, encoder_out) # (B, 1, 2H)
+        x = torch.cat([embed, context], dim = -1) # (B, 1, E+2H)
+
+        output, (hidden, cell) = self.lstm(x, (hidden, cell)) # (2, B, H)
+        logit = self.out(output) # (B, V)
+
+        return logit, hidden, cell, attn 
+
+    
+    def forward(self, embed, encoder_outs, encoder_h, encoder_c, target=None):
+        B = encoder_outs.size[0]
+        decoder_in = torch.empty(B, 1, dtype=torch.long)
+        decoder_h = encoder_h
+        decoder_c = encoder_c
+        decoder_outs = []
+        attn_weights = []
+
+
+        for i in range(S):
+            out, hidden, cell, attn = self.forward_step(decoder_in, decoder_h, decoder_c, encoder_outs)
+            decoder_outs.append(out)
+            attn_weights.append(attn)
+
+            if target is not None: # training
+                decoder_in = target[:, i].unsqueeze(1)
+            else: # inference
+                _, topi = out.topk(1)
+                decoder_in = topi.squeeze(-1).detach()
+
+            decoder_outs = torch.cat(decoder_outs, dim=1)
+            decoder_outs = F.log_softmax(decoder_outs, dim=-1)
+            attentions = torch.cat(attn_weights, dim=1)
+        
+        return decoder_outs, decoder_h, decoder_c, attentions
+        
+class Bridge(nn.Module):
+    def __init__(self, H):
+        super().__init__()
+        """
+        Bridge logic: encoder's h/c come out of nn.LSTM as [num_layers*2, B, H] = [4, B, H] (layer0-fwd, layer0-bwd, layer1-fwd, layer1-bwd, in that order). For each of the 2 layers: concat that layer's fwd+bwd [B,H]+[B,H] → [B,2H], then Linear(2H,H) + tanh → [B,H]. Stack the 2 layers → [2,B,H]. Do this separately for h and c
+        """
+        self.layer = nn.Linear(2*H, H)
+
+    def forward(self, encoder_h, encoder_c):
+        # l0 fwd, lo bwd, l1 fwd, l1 bwd = [B, H] each
+        l0 = torch.cat([encoder_h[0], encoder_h[1]], dim=1)
+        l1 = torch.cat([encoder_h[2], encoder_h[3]], dim=1)
+
+        c0 = torch.cat([encoder_c[0], encoder_c[1]], dim=1)
+        c1 = torch.cat([encoder_c[2], encoder_c[3]], dim=1)
+
+        l0 = torch.tanh(self.layer(l0))
+        l1 = torch.tanh(self.layer(l1))
+        c0 = torch.tanh(self.layer(c0))
+        c1 = torch.tanh(self.layer(c1))
+
+        decoder_h = torch.stack([l0, l1]) # [2, B, H]
+        decoder_c = torch.stack([c0, c1]) # [2, B, H]
+        return decoder_h, decoder_c
+
+
+
+class Seq2SeqModel(nn.Module):
+    def __init__(self, in_dim, V, H, E, dropout=0.3):
+        self.embedding = nn.Embedding(in_dim, E)
+        self.encoder = Encoder(self.embedding, H)
+        self.bridge = Bridge(H)
+        self.decoder = Decoder(self.embedding, H, V, E, dropout)
+
+    
+    def forward(self, source, lengths, target):
+        encoder_out, encoder_h, encoder_c = self.encoder(source, lengths)
+        decoder_h, decoder_c = self.bridge(encoder_h, encoder_c)
+        decoder_out, _, _, decoder_attn = self.decoder(encoder_out, encoder_h, encoder_c, target)
+
+        return decoder_out, decoder_attn
+
+
+

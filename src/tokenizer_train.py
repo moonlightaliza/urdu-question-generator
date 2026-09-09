@@ -2,9 +2,6 @@ from pathlib import Path
 import csv
 import sentencepiece as spm
 
-# --------------------------------------------------
-# 1. Paths
-# --------------------------------------------------
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR.parent / "data"
@@ -13,17 +10,10 @@ TRAIN_PATH = DATA_DIR / "train.tsv"
 CORPUS_PATH = BASE_DIR / "sp_corpus.txt"
 MODEL_PREFIX = BASE_DIR / "ur_sp"
 
-# --------------------------------------------------
-# A.4 — Train the SentencePiece tokenizer
-# --------------------------------------------------
 
 ANS_OPEN = "<ans>"
 ANS_CLOSE = "</ans>"
 
-# --------------------------------------------------
-# 2. Create tokenizer training corpus
-#    Use TRAIN split only
-# --------------------------------------------------
 
 train_pairs = []
 
@@ -49,9 +39,6 @@ with open(CORPUS_PATH, "w", encoding="utf-8") as f:
 
 print(f"Corpus written to: {CORPUS_PATH}")
 
-# --------------------------------------------------
-# 3. Train SentencePiece tokenizer
-# --------------------------------------------------
 
 spm.SentencePieceTrainer.train(
     input=str(CORPUS_PATH),
@@ -66,9 +53,6 @@ spm.SentencePieceTrainer.train(
     eos_id=3,
 )
 
-# --------------------------------------------------
-# 4. Load the trained tokenizer
-# --------------------------------------------------
 
 sp = spm.SentencePieceProcessor(
     model_file=str(MODEL_PREFIX) + ".model"
@@ -79,9 +63,6 @@ UNK = 1
 BOS = 2
 EOS = 3
 
-# --------------------------------------------------
-# 5. Test the tokenizer
-# --------------------------------------------------
 
 src, tgt = train_pairs[0]
 

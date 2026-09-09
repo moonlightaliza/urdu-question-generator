@@ -25,6 +25,7 @@ checkpoints/
 
 # Raw/large data (optional — see note)
 data/*.tsv
+sp_corpus.txt
 
 # Kaggle/Colab specific
 kaggle.json

@@ -68,8 +68,3 @@ if __name__ == "__main__":
     print(f"train rows: {n_total}, answerable: {n_ans}")
     train_pairs = build_split(ds["train"], "train.tsv")
     valid_pairs = build_split(ds["validation"], "valid.tsv")
-
-
-
-
-# %%
