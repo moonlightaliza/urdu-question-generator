@@ -1,16 +1,12 @@
 from datasets import load_dataset
-ds = load_dataset("uqa/UQA")
-
-print(ds)
-ex = ds["train"][0]
-print(ex.keys())  # id, title, context, question, answers
-print(ex["question"])
-print(ex["answer"])  # {'text': [...], 'answer_start': [...]}
-n_total = len(ds["train"])
-n_ans = sum(len(a) > 0 for a in ds["train"]["answer"])
-print(f"train rows: {n_total}, answerable: {n_ans}")
-
+from pathlib import Path
+import matplotlib.pyplot as plt
 import csv
+
+BASE_DIR = Path(__file__).resolve().parent.parent  
+FIGURES_DIR = BASE_DIR / "results" / "figures"
+FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+
 ANS_OPEN, ANS_CLOSE = "<ans>", "</ans>"
 SENT_DELIMS = "\u06D4\u061F!"
 
@@ -45,6 +41,7 @@ def make_pair(example, max_src=60, max_tgt=25):
             return src, tgt
     return None
 
+
 #%%
 def build_split(split, out_path):
     pairs = [p for p in map(make_pair, split) if p is not None]
@@ -53,6 +50,24 @@ def build_split(split, out_path):
         w.writerows(pairs)
     print(f"{out_path}: {len(pairs)} pairs")
     return pairs
+
+def plot_length_histogram(pairs, title, out_path):
+    src_lens = [len(src.split()) for src, tgt in pairs]
+    tgt_lens = [len(tgt.split()) for src, tgt in pairs]
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    axes[0].hist(src_lens, bins=20)
+    axes[0].set_title(f"{title} — source length")
+    axes[0].set_xlabel("tokens")
+
+    axes[1].hist(tgt_lens, bins=20)
+    axes[1].set_title(f"{title} — target length")
+    axes[1].set_xlabel("tokens")
+
+    plt.tight_layout()
+    plt.savefig(out_path)
+    print(f"Saved histogram to {out_path}")
+
 
 if __name__ == "__main__":
     ds = load_dataset("uqa/UQA")
@@ -68,3 +83,9 @@ if __name__ == "__main__":
     print(f"train rows: {n_total}, answerable: {n_ans}")
     train_pairs = build_split(ds["train"], "train.tsv")
     valid_pairs = build_split(ds["validation"], "valid.tsv")
+    
+
+    plot_length_histogram(train_pairs, "Train", FIGURES_DIR / "train_length_hist.png")
+    plot_length_histogram(valid_pairs, "Valid", FIGURES_DIR / "valid_length_hist.png")
+
+# %%

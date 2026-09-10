@@ -17,7 +17,7 @@ class Encoder(nn.Module):
     def forward(self, source, lengths):
         embedded = self.embedding(source)
         packed_input = torch.nn.utils.rnn.pack_padded_sequence(embedded, lengths, batch_first = True, enforce_sorted = False)    
-        output, h,c = self.lstm(packed_input)
+        output, (h,c) = self.lstm(packed_input)
         unpacked_output, _ = torch.nn.utils.rnn.pad_packed_sequence(output, batch_first = True)
 
         return unpacked_output, h, c
