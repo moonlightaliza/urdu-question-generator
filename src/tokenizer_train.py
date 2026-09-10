@@ -76,3 +76,17 @@ decoded = sp.decode(sp.encode(tgt))
 
 print("\nROUND-TRIP CHECK:")
 print(decoded == tgt)
+
+print("\n Five tokenized examples")
+for i in range(5):
+    src, tgt = train_pairs[i]
+    print(f"\nExample {i+1}")
+    print("Source:", src)
+    print("Pieces:", sp.encode(src, out_type=str))
+
+
+# HOW URDU MORPHOLOGY IS SPLIT?
+# Common and most used words/conjunctions are not split up and treated as a whole
+# For e.g میں, اور etc.
+# Split is mostly consistent, and words are broken up same throughout examples
+# Numbers stay as single tokens
