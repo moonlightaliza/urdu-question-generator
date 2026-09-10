@@ -24,6 +24,7 @@ checkpoints/
 *.vocab
 
 # Raw/large data (optional — see note)
+*.tsv
 data/*.tsv
 sp_corpus.txt
 

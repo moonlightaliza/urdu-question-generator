@@ -4,20 +4,22 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import sentencepiece as spm
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, ConcatDataset
 from model import Seq2SeqModel
+from datasets import load_dataset
+from data_prep import make_pair 
 
 train_set = pd.read_csv("../data/train.tsv", delimiter='\t', header=None, names=['source', 'target'])
 val_set = pd.read_csv("../data/valid.tsv", delimiter='\t', header=None, names=['source', 'target'])
 
 # load tokenizer
-sp = spm.SentencePieceProcessor(model_file='../tokenizer/ur_sp.model')
+sp = spm.SentencePieceProcessor('../tokenizer/ur_sp.model')
 
 UNK_ID = sp.unk_id()
 BOS_ID = sp.bos_id()
 EOS_ID = sp.eos_id()
 SP_PAD_ID = sp.pad_id()
-VOCAB = 8000
+VOCAB = sp.get_piece_size()
 
 
 class UrduDataset(Dataset):
@@ -37,7 +39,7 @@ def collate_function(batch):
     sources,targets = zip(*batch)
 
     src_ids = [sp.encode(s, out_type=int) for s in sources]
-    tgt_ids = [sp.encode(t, out_type=int) for t in targets]
+    tgt_ids = [[BOS_ID] + sp.encode(t, out_type=int) + [EOS_ID] for t in targets]
 
     src_lens = [len(s) for s in src_ids]
     tgt_lens = [len(t) for t in tgt_ids]
@@ -62,24 +64,24 @@ val_loader = DataLoader(val_data, batch_size=64, shuffle=False, collate_fn=colla
 model = Seq2SeqModel(in_dim=sp.get_piece_size(), V=VOCAB, H=512, E=256, dropout=0.3)
 
 loss = torch.nn.CrossEntropyLoss(ignore_index=SP_PAD_ID)
-optim = torch.optim.AdamW(model.parameters(), lr=1e-4)
+optim = torch.optim.Adam(model.parameters(), lr=1e-4)
 
 # train loop
 def train_run(model, loader, optim, loss, device):
     model.to(device)
     model.train()
 
-    total_correct, total_tokens, total_loss = 0, 0, 0
+    total_correct, total_tokens = 0, 0
+    total_nll = 0.0
     for batch in loader:
         optim.zero_grad()
 
         src = batch['src'].to(device)
-        src_lens = batch['src_lens'].to(device)
+        src_lens = batch['src_lens']
         tgt = batch['tgt'].to(device)
-        tgt_lens = batch['tgt_lens'].to(device)
 
         out, attn = model(src, src_lens, tgt)
-        logits = out[:, :-1, :] # logits: [B, T-1, V]
+        logits = out # logits: [B, T-1, V]
         labels = tgt[:, 1:] # targets: [B, T-1]
 
         step_loss = loss(logits.reshape(-1, VOCAB), labels.reshape(-1))
@@ -90,15 +92,18 @@ def train_run(model, loader, optim, loss, device):
 
         pred = logits.detach().argmax(dim=-1)
         mask = (labels != SP_PAD_ID)
+        n_tokens = mask.sum().item()
+        total_nll += step_loss.item() * n_tokens
         correct = (pred == labels) & mask 
         total_correct += correct.sum().item()
-        total_tokens += mask.sum().item()
+        total_tokens += n_tokens
     
     # training accuracy
+    nll = total_nll / total_tokens
     accuracy = total_correct / total_tokens
-    print(f"tr_loss = {total_loss / len(loader):.4f} | tr_acc = {accuracy:.4f}")
+    print(f"tr_loss = {nll / len(loader):.4f} | tr_acc = {accuracy:.4f}")
 
-    return total_loss, accuracy
+    return nll, accuracy
     
 
 # validation loop
@@ -106,16 +111,16 @@ def val_run(model, loader, loss, device):
     model.to(device)
     model.eval()
 
-    total_correct, total_tokens, total_loss = 0, 0, 0
+    total_correct, total_tokens = 0, 0
+    total_nll = 0.0
     with torch.no_grad():
         for batch in loader:
             src = batch['src'].to(device)
-            src_lens = batch['src_lens'].to(device)
+            src_lens = batch['src_lens']
             tgt = batch['tgt'].to(device)
-            tgt_lens = batch['tgt_lens'].to(device)
 
-            out, attn = model(src, src_lens, tgt)
-            logits = out[:, :-1, :] # logits: [B, T-1, V]
+            out, attn = model(src, src_lens, tgt, is_train=True)
+            logits = out # logits: [B, T-1, V]
             labels = tgt[:, 1:] # targets: [B, T-1]
 
             step_loss = loss(logits.reshape(-1, VOCAB), labels.reshape(-1))
@@ -123,19 +128,24 @@ def val_run(model, loader, loss, device):
             
             pred = logits.detach().argmax(dim=-1)
             mask = (labels != SP_PAD_ID)
+            n_tokens = mask.sum().item()
+            total_nll += step_loss.item() * n_tokens
             correct = (pred == labels) & mask 
             total_correct += correct.sum().item()
-            total_tokens += mask.sum().item()
+            total_tokens += n_tokens
     
     # validation accuracy
     accuracy = total_correct / total_tokens
-    print(f"val_loss = {total_loss / len(loader):.4f} | val_acc = {accuracy:.4f}")
+    nll = total_nll / total_tokens
+    print(f"val_loss = {nll / len(loader):.4f} | val_acc = {accuracy:.4f}")
 
-    return total_loss, accuracy  
+    return nll, accuracy  
 
 
 def train_model(model, train_loader, val_loader, optimizer, loss, device, epochs):
     train_losses, val_losses = [], []
+    train_accs, val_accs = [], []
+    best_val_loss = float("inf")
 
     for epoch in range(epochs):
         print(f"\nEpoch {epoch+1}/{epochs}")
@@ -143,8 +153,24 @@ def train_model(model, train_loader, val_loader, optimizer, loss, device, epochs
         # train run
         tr_loss, tr_acc = train_run(model, train_loader, optimizer, loss, device)
         train_losses.append(tr_loss)
+        train_accs.append(tr_acc)
         
         # validation run
         val_loss, val_acc = val_run(model, val_loader, loss, device)
         val_losses.append(val_loss) 
+        val_accs.append(val_acc)
 
+        if val_loss < best_val_loss:
+            torch.save(model.state_dict(), '../checkpoints/best_model.pt')
+            best_val_loss = val_loss
+
+    return {
+        "train_loss": train_losses,
+        "val_loss": val_losses,
+        "train_acc": train_accs,
+        "val_acc": val_accs,
+    }
+
+
+if __name__ == '__main__':
+    history = train_model(model, train_loader, val_loader, optim, loss, device='cuda' if torch.cuda.is_available() else 'cpu', epochs=15)
