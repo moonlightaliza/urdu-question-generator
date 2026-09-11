@@ -24,7 +24,7 @@ def make_pair(example, max_src=60, max_tgt=25):
     if not a_text:
         return None
     context = example["context"]
-    a_start = context.find(a_text)
+    a_start = example["answer_start"]
     if a_start == -1:
         return None
     for s, e, sent in split_sentences(context):
