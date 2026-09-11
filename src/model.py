@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 class Encoder(nn.Module):
     def __init__(self, embedding, hidden_dim = 512):
@@ -16,7 +17,7 @@ class Encoder(nn.Module):
         )
     def forward(self, source, lengths):
         embedded = self.embedding(source)
-        packed_input = torch.nn.utils.rnn.pack_padded_sequence(embedded, lengths, batch_first = True, enforce_sorted = False)    
+        packed_input = torch.nn.utils.rnn.pack_padded_sequence(embedded, lengths, batch_first = True, enforce_sorted = False)
         output, (h,c) = self.lstm(packed_input)
         unpacked_output, _ = torch.nn.utils.rnn.pad_packed_sequence(output, batch_first = True)
 
@@ -28,9 +29,6 @@ class Encoder(nn.Module):
 # S = source length, T = target length, B = batch size
 # V = vocabulary
 
-import torch.nn as nn
-import torch.nn.functional as F
-import torch
 
 PAD_ID = 0
 BOS_ID = 2
@@ -44,7 +42,7 @@ class BahdanauAttention(nn.Module):
         self.W1 = nn.Linear(H, H)
         self.W2 = nn.Linear(2*H, H)
         self.V = nn.Linear(H, 1)
-    
+
     def forward(self, query, keys, mask=None):
         query = query.unsqueeze(1) # [B, H] -> [B, 1, H]
         scores = self.V(torch.tanh(self.W1(query) + self.W2(keys))) # [B, S, 1]
@@ -60,14 +58,15 @@ class BahdanauAttention(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, embedding, H, V, E, dropout = 0.1):
+    def __init__(self, embedding, H, V, E, dropout = 0.3):
         super().__init__()
         self.embedding = embedding
         self.lstm = nn.LSTM(input_size=E + 2*H, num_layers=2, hidden_size=H, batch_first=True, dropout=dropout)
         self.attention = BahdanauAttention(H)
-        self.out = nn.Linear(H, V)
+        # self.out = nn.Linear(2*H + E + H, V) # context + embedding + output
+        self.readout = nn.Linear(E + 2*H + H, E)
 
-    
+
     def forward_step(self, inp, hidden, cell, encoder_out, src_mask=None):
         embed = self.embedding(inp) # (B, 1, E)
         query = hidden[-1] # (B, H)
@@ -75,11 +74,43 @@ class Decoder(nn.Module):
         x = torch.cat([embed, context], dim = -1) # (B, 1, E+2H)
 
         output, (hidden, cell) = self.lstm(x, (hidden, cell)) # (2, B, H)
-        logit = self.out(output) # (B, V)
+        # logit = self.out(torch.cat([output, context, embed], dim=-1)) # (B, V)
+        r = torch.tanh(self.readout(torch.cat([output, context, embed], dim=-1)))
+        logit = F.linear(r, self.embedding.weight)
 
-        return logit, hidden, cell, attn 
+        return logit, hidden, cell, attn
 
-    
+
+    def beam_decode(self, encoder_outs, decoder_h, decoder_c, src_mask, beam_size=3, max_steps=32):
+        beams = [([BOS_ID], 0.0, decoder_h, decoder_c)]
+
+        for _ in range(max_steps):
+            candidates = []
+
+            for tokens, score, hidden, cell in beams:
+                if tokens[-1] == EOS_ID:
+                    candidates.append((tokens, score, hidden, cell))
+                    continue
+
+                decoder_in = torch.tensor([[tokens[-1]]], device=encoder_outs.device)
+                out, next_h, next_c, _ = self.forward_step(decoder_in, hidden, cell, encoder_outs, src_mask)
+
+                log_probs = F.log_softmax(out[:, -1, :], dim=-1)
+                top_scores, top_ids = torch.topk(log_probs, beam_size, dim=-1)
+
+                for j in range(beam_size):
+                    next_id = top_ids[0, j].item()
+                    candidates.append((tokens + [next_id], score + top_scores[0, j].item(), next_h, next_c))
+
+            beams = sorted(candidates, key=lambda x: x[1], reverse=True)[:beam_size]
+
+            if all(tokens[-1] == EOS_ID for tokens, _, _, _ in beams):
+                break
+
+        return beams[0][0]
+
+
+
     def forward(self, encoder_outs, decoder_h, decoder_c, target=None, src_mask=None):
         B = encoder_outs.size(0)
         decoder_outs = []
@@ -93,9 +124,11 @@ class Decoder(nn.Module):
             decoder_in = torch.full((B,1), BOS_ID, device=encoder_outs.device)
             steps = MAX_DECODE_STEPS
 
+        hidden, cell = decoder_h, decoder_c
+
 
         for i in range(steps):
-            out, hidden, cell, attn = self.forward_step(decoder_in, decoder_h, decoder_c, encoder_outs, src_mask)
+            out, hidden, cell, attn = self.forward_step(decoder_in, hidden, cell, encoder_outs, src_mask)
             decoder_outs.append(out)
             attn_weights.append(attn)
 
@@ -108,11 +141,11 @@ class Decoder(nn.Module):
                 if torch.all(next_token == EOS_ID):
                     break
 
-            decoder_outs = torch.cat(decoder_outs, dim=1)
-            attentions = torch.cat(attn_weights, dim=1)
-        
-        return decoder_outs, decoder_h, decoder_c, attentions
-        
+        decoder_outs = torch.cat(decoder_outs, dim=1)
+        attentions = torch.cat(attn_weights, dim=1)
+
+        return decoder_outs, hidden, cell, attentions
+
 class Bridge(nn.Module):
     def __init__(self, H):
         super().__init__()
@@ -148,20 +181,17 @@ class Seq2SeqModel(nn.Module):
         self.bridge = Bridge(H)
         self.decoder = Decoder(self.embedding, H, V, E, dropout)
 
-    
-    def forward(self, source, lengths, target, is_train=True):
+
+    def forward(self, source, lengths, target, is_train=True, decoding='greedy', beam_size=3):
         encoder_out, encoder_h, encoder_c = self.encoder(source, lengths)
         decoder_h, decoder_c = self.bridge(encoder_h, encoder_c)
         lens_t = torch.as_tensor(lengths, device=source.device)
-        longest_len = torch.arange(encoder_out.size(1), device=source.device).unsqueeze(0)
-        src_mask = longest_len < lens_t.unsqueeze(1)
-        
-        if is_train:
-            decoder_out, _, _, decoder_attn = self.decoder(encoder_out, decoder_h, decoder_c, target=target, src_mask=src_mask)
-        else:
-            decoder_out, _, _, decoder_attn = self.decoder(encoder_out, decoder_h, decoder_c, src_mask=src_mask)
-        
+        positions = torch.arange(encoder_out.size(1), device=source.device).unsqueeze(0)
+        src_mask = positions < lens_t.unsqueeze(1)
+
+        if not is_train and decoding == 'beam':
+          return self.decoder.beam_decode(encoder_out, decoder_h, decoder_c, src_mask, beam_size)
+
+        decoder_out, _, _, decoder_attn = self.decoder(encoder_out, decoder_h, decoder_c, target=target if is_train else None, src_mask=src_mask)
+
         return decoder_out, decoder_attn
-
-
-
