@@ -6,3 +6,5 @@ pandas
 numpy
 rouge-score
 sacrebleu
+datasets
+matplotlib

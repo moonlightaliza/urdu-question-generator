@@ -30,3 +30,8 @@ sp_corpus.txt
 
 # Kaggle/Colab specific
 kaggle.json
+
+train.tsv
+valid.tsv
+
+sp_corpus.txt

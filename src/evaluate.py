@@ -2,14 +2,15 @@ import sacrebleu
 from rouge_score import rouge_scorer
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import sentencepiece as spm
-from model import Seq2SeqModel
 from datasets import load_dataset
-from data_prep import make_pair 
+import unicodedata
 from torch.utils.data import Dataset, DataLoader
+from model import Seq2SeqModel
+from data_prep import make_pair
+import matplotlib.pyplot as plt
 
-sp = spm.SentencePieceProcessor('../tokenizer/ur_sp.model')
+sp = spm.SentencePieceProcessor('tokenizer/ur_sp.model')
 
 UNK_ID = sp.unk_id()
 BOS_ID = sp.bos_id()
@@ -36,7 +37,17 @@ class TestDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.ex[idx]
-    
+
+
+class UrduTokenizer:
+    def tokenize(self, text):
+        text = "".join(
+            c if c.isalnum() or unicodedata.category(c).startswith("M") else " "
+            for c in text.lower()
+        )
+        return text.split()
+
+
 
 def test_collate(batch):
     src_ids = [torch.tensor(ex['src_ids']) for ex in batch]
@@ -57,7 +68,7 @@ def test_collate(batch):
 
 def score(hyps, refs):
     bleu = sacrebleu.corpus_bleu(hyps, [refs]).score
-    scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=False)
+    scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=False, tokenizer=UrduTokenizer())
     rl = sum(scorer.score(r, h)["rougeL"].fmeasure  for h, r in zip( hyps , refs ) ) / len( refs )
     unk_rate = sum(h.count("\u2047") for h in hyps ) / max(1, sum(len( h . split ()) for h in hyps))
 
@@ -68,7 +79,6 @@ def test_model(model, loader, loss, device):
     model.to(device)
     model.eval()
     total_loss = 0
-    total_correct = 0
     total_tokens = 0
 
     with torch.no_grad():
@@ -85,28 +95,23 @@ def test_model(model, loader, loss, device):
             mask = (labels != SP_PAD_ID)
             n_tokens = mask.sum().item()
             total_loss += step_loss.item() * n_tokens
-
-            pred = logits.detach().argmax(dim=-1)
-            correct = (pred == labels) & mask
-            total_correct += correct.sum().item()
             total_tokens += n_tokens
 
-    accuracy = total_correct / total_tokens
     nll = total_loss / total_tokens
     perplexity = torch.exp(torch.tensor(nll)).item()
 
     print(
         f"test_loss = {nll:.4f} | "
-        f"test_ppl = {perplexity:.4f} | "
-        f"test_acc = {accuracy:.4f}"
+        f"test_ppl = {perplexity:.4f}"
     )
 
-    return nll, perplexity, accuracy
+    return nll, perplexity
 
 
 # BLEU score, ROUGEL, unknown rate
 def decode_ids(ids):
-    ids = ids.to_list()
+    if torch.is_tensor(ids):
+        ids = ids.tolist()
     if EOS_ID in ids:
         ids = ids[:ids.index(EOS_ID)]
     ids = [tkn for tkn in ids if tkn not in {BOS_ID, SP_PAD_ID, EOS_ID}]
@@ -126,15 +131,28 @@ def greedy_decode(model, loader, device):
             pred = out.argmax(dim=-1)
             for ids in pred:
                 hyps.append(decode_ids(ids))
-            
+
             refs.extend(batch['tgt_text'])
             srcs.extend(batch['src_text'])
 
-    return srcs, hyps, refs 
+    return srcs, hyps, refs
 
+
+def beam_decode(model, loader, device, beam_size=3):
+  model.eval()
+  hyps = []
+
+  with torch.no_grad():
+    for batch in loader:
+      for i in range(len(batch['src_lens'])):
+          src = batch['src'][i:i+1].to(device)
+          ids = model(src, [batch['src_lens'][i]], target=None, is_train=False, decoding='beam', beam_size=beam_size)
+          hyps.append(decode_ids(ids))
+
+  return hyps
 
 if __name__ == '__main__':
-    # load best model
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     uqa = load_dataset("uqa/UQA", split="validation")
     wuqa = load_dataset("uqa/Wiki-UQA", split="train")
 
@@ -144,37 +162,77 @@ if __name__ == '__main__':
     print(f"UQA validation pairs: {len(uqa_pairs)}")
     print(f"Wiki-UQA pairs: {len(wuqa_pairs)}")
 
-
     uqa_data_test = TestDataset(uqa_pairs)
     wuqa_data_test = TestDataset(wuqa_pairs)
 
-    uqa_testloader = DataLoader(uqa_data_test, batch_size=64, shuffle=False, collate_fn=test_collate)
-    wuqa_testloader = DataLoader(wuqa_data_test, batch_size=64, shuffle=False, collate_fn=test_collate)
+    uqa_testloader = DataLoader(uqa_data_test, batch_size=64, shuffle=False, collate_fn=test_collate, pin_memory=True)
+    wuqa_testloader = DataLoader(wuqa_data_test, batch_size=64, shuffle=False, collate_fn=test_collate, pin_memory=True)
 
-
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model = Seq2SeqModel(in_dim=VOCAB, V=VOCAB, H=512, E=256, dropout=0.3)
-    state_dict = torch.load('../checkpoints/best_model.pt', map_location=device)
+    state_dict = torch.load('checkpoints/best_model.pt', map_location=device)
     model.load_state_dict(state_dict)
     model.to(device)
-    
+
     model.eval()
     loss = nn.CrossEntropyLoss(ignore_index=SP_PAD_ID)
-    
-    uqa_loss, uqa_ppl, uqa_acc = test_model(model, uqa_testloader, loss, device)
-    wqa_loss, wqa_ppl, wqa_acc = test_model(model, wuqa_testloader, loss, device)
 
-    uqa_srcs, uqa_hyps, uqa_refs = greedy_decode(model, uqa_testloader, device)
-    uqa_scores_greedy = score(uqa_hyps, uqa_refs)
-    wqa_srcs, wqa_hyps, wqa_refs = greedy_decode(model, wuqa_testloader, device)
-    wqa_scores_greedy = score(wqa_hyps, wqa_refs)
+    print("Results on UQA evaluation:")
+    uqa_loss, uqa_ppl = test_model(model, uqa_testloader, loss, device)
+    print("\nResults on Wiki-UQA evaluation:")
+    wqa_loss, wqa_ppl = test_model(model, wuqa_testloader, loss, device)
 
-    print("\nUQA validation")
+    uqa_srcs, uqa_greedy, uqa_refs = greedy_decode(model, uqa_testloader, device)
+    wqa_srcs, wqa_greedy, wqa_refs = greedy_decode(model, wuqa_testloader, device)
+
+    uqa_beam = beam_decode(model, uqa_testloader, device, beam_size=3)
+    wqa_beam = beam_decode(model, wuqa_testloader, device, beam_size=3)
+    print("Beam decode done.")
+
+    uqa_scores_greedy = score(uqa_greedy, uqa_refs)
+    uqa_scores_beam = score(uqa_beam, uqa_refs)
+    print("UQA Decoding eval done..")
+
+    wqa_scores_greedy = score(wqa_greedy, wqa_refs)
+    wqa_scores_beam = score(wqa_beam, wqa_refs)
+    print("WQA decoding eval done.")
+
+    print("\nUQA validation (Greedy)")
     print("PPL:", uqa_ppl)
     print(uqa_scores_greedy)
 
-    print("\nWiki-UQA")
+    print("\nUQA validation (Beam)")
+    print("PPL:", uqa_ppl)
+    print(uqa_scores_beam)
+
+    print("\nWiki-UQA validation (Greedy)")
     print("PPL:", wqa_ppl)
     print(wqa_scores_greedy)
 
-    
+    print("\nWiki-UQA validation (Beam)")
+    print("PPL:", wqa_ppl)
+    print(wqa_scores_beam)
+
+    batch = next(iter(uqa_testloader))
+    src = batch["src"].to(device)
+
+    with torch.no_grad():
+        out, attn = model(src, batch["src_lens"], target=None, is_train=False)
+
+    i = 0
+    pred = out[i].argmax(-1)
+    src_ids = src[i, :batch["src_lens"][i]].cpu().tolist()
+    pred_ids = pred.cpu().tolist()
+
+    if EOS_ID in pred_ids:
+        pred_ids = pred_ids[:pred_ids.index(EOS_ID) + 1]
+
+    A = attn[i, :len(pred_ids), :len(src_ids)].cpu().numpy()
+
+    plt.figure(figsize=(10, 6))
+    plt.imshow(A, aspect="auto")
+    plt.xticks(range(len(src_ids)), [sp.id_to_piece(x) for x in src_ids], rotation=90)
+    plt.yticks(range(len(pred_ids)), [sp.id_to_piece(x) for x in pred_ids])
+    plt.xlabel("Source tokens")
+    plt.ylabel("Generated tokens")
+    plt.tight_layout()
+    plt.savefig("results/attention_heatmap.png", dpi=300, bbox_inches="tight")

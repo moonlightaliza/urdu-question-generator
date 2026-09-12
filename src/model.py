@@ -63,7 +63,6 @@ class Decoder(nn.Module):
         self.embedding = embedding
         self.lstm = nn.LSTM(input_size=E + 2*H, num_layers=2, hidden_size=H, batch_first=True, dropout=dropout)
         self.attention = BahdanauAttention(H)
-        # self.out = nn.Linear(2*H + E + H, V) # context + embedding + output
         self.readout = nn.Linear(E + 2*H + H, E)
 
 
@@ -74,7 +73,6 @@ class Decoder(nn.Module):
         x = torch.cat([embed, context], dim = -1) # (B, 1, E+2H)
 
         output, (hidden, cell) = self.lstm(x, (hidden, cell)) # (2, B, H)
-        # logit = self.out(torch.cat([output, context, embed], dim=-1)) # (B, V)
         r = torch.tanh(self.readout(torch.cat([output, context, embed], dim=-1)))
         logit = F.linear(r, self.embedding.weight)
 
@@ -149,9 +147,6 @@ class Decoder(nn.Module):
 class Bridge(nn.Module):
     def __init__(self, H):
         super().__init__()
-        """
-        Bridge logic: encoder's h/c come out of nn.LSTM as [num_layers*2, B, H] = [4, B, H] (layer0-fwd, layer0-bwd, layer1-fwd, layer1-bwd, in that order). For each of the 2 layers: concat that layer's fwd+bwd [B,H]+[B,H] → [B,2H], then Linear(2H,H) + tanh → [B,H]. Stack the 2 layers → [2,B,H]. Do this separately for h and c
-        """
         self.layer = nn.Linear(2*H, H)
 
     def forward(self, encoder_h, encoder_c):

@@ -1,2 +1,2 @@
 encoder,decoder,embedding_dim,hidden_dim,vocab_size,trainable_parameters,optimizer,learning_rate,schedule,batch_size,epochs,wall_clock_seconds,gpu
-2-layer BiLSTM,2-layer LSTM + Bahdanau attention,256,512,8000,19048705,Adam,0.00025,None,64,15,1413.1847343444824,NVIDIA L4
+2-layer BiLSTM,2-layer LSTM + Bahdanau attention,256,512,8000,19048705,Adam,3.125e-05,ReduceLROnPlateau,64,15,2905.907021522522,NVIDIA L4
